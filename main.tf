@@ -1,12 +1,21 @@
-data "aws_vpc" "development" {
-  cidr_block = "10.16.0.0/16"
+locals {
+  tags = {
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+
+
+resource "aws_vpc" "vpc" {
+  cidr_block = var.vpc_cidr
 }
 
 #Deploying guardduty and suppressing low severity findings
 module "guardduty" {
   source = "aws-ia/guardduty/aws"
 
-  replica_region               = "us-east-1"
+  replica_region               = var.region
   enable_guardduty             = true
   enable_malware_protection    = true
   finding_publishing_frequency = "FIFTEEN_MINUTES"
@@ -19,7 +28,7 @@ module "guardduty" {
 
       {
         field  = "region"
-        equals = ["us-east-1"]
+        equals = [var.region]
       },
       {
         field              = "severity"
@@ -28,10 +37,10 @@ module "guardduty" {
   ] }]
 
 
-  publish_to_s3        = true
-  tags                 = {
-    ManagedBy = "Terraform"
-    Environment = "Development"
+  publish_to_s3 = true
+  tags = {
+    ManagedBy   = local.tags.ManagedBy
+    Environment = local.tags.Environment
   }
 }
 
@@ -43,11 +52,11 @@ resource "aws_sns_topic" "user_updates" {
 
 #Deploying the EventBridge rule for GuardDuty findings
 module "eventbridge" {
-  source = "terraform-aws-modules/eventbridge/aws"
+  source     = "terraform-aws-modules/eventbridge/aws"
   create_bus = false
   rules = {
     logs = {
-      description   = "Capture GuardDuty Findings for EC2 Instances"
+      description = "Capture GuardDuty Findings for EC2 Instances"
       event_pattern = jsonencode({
         "source" : ["aws.guardduty"],
         "detail-type" : ["GuardDuty Finding"],
@@ -55,7 +64,7 @@ module "eventbridge" {
           "resource" : {
             "resourceType" : ["Instance"]
           }
-        "severity" : [{
+          "severity" : [{
             "numeric" : [">", 5]
           }]
         }
@@ -76,11 +85,11 @@ module "eventbridge" {
 resource "aws_security_group" "isolated" {
   name        = "isolated-sg"
   description = "Isolation security group - blocks all traffic"
-  vpc_id      = data.aws_vpc.development.id
-  
+  vpc_id      = resource.aws_vpc.vpc.id
+
   # No ingress rules = blocks all inbound traffic
   # No egress rules defined = blocks all outbound traffic (after removing default)
-  
+
   tags = {
     Name      = "isolated-sg"
     Purpose   = "GuardDuty-Isolation"
@@ -91,11 +100,11 @@ resource "aws_security_group" "isolated" {
 # Remove the default egress rule that allows all outbound traffic
 resource "aws_vpc_security_group_egress_rule" "isolated_remove_default" {
   security_group_id = aws_security_group.isolated.id
-  
+
   # This effectively removes all egress by not defining any rules
   # AWS creates a default "allow all" egress rule, so we need to revoke it
   ip_protocol = "-1"
-  cidr_ipv4   = "127.0.0.1/32"  # Dummy rule to localhost only
+  cidr_ipv4   = "127.0.0.1/32" # Dummy rule to localhost only
 }
 
 
@@ -123,7 +132,7 @@ resource "aws_iam_role" "execution_role" {
 resource "aws_iam_role_policy" "lambda_ec2_permissions" {
   name = "lambda-ec2-permissions"
   role = aws_iam_role.execution_role.id
-  
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -150,7 +159,7 @@ resource "aws_iam_role_policy" "lambda_ec2_permissions" {
 resource "aws_iam_role_policy" "lambda_sns" {
   name = "lambda-sns"
   role = aws_iam_role.execution_role.id
-  
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -188,20 +197,20 @@ resource "aws_lambda_function" "AutoRemediation" {
   function_name = "Automated_Remediation"
   role          = aws_iam_role.execution_role.arn
   handler       = "lambdaFunction.lambda_handler"
-  runtime = "python3.13"
+  runtime       = "python3.13"
 
   environment {
     variables = {
-      ENVIRONMENT = "development"
-      LOG_LEVEL   = "info"
-      SNS_TOPIC = aws_sns_topic.user_updates.arn
+      ENVIRONMENT  = local.tags.Environment
+      LOG_LEVEL    = "info"
+      SNS_TOPIC    = aws_sns_topic.user_updates.arn
       ISOLATION_SG = aws_security_group.isolated.id
     }
   }
 
   tags = {
-    Environment = "development"
-    ManagedBy = "Terraform"
+    Environment = local.tags.Environment
+    ManagedBy   = local.tags.ManagedBy
   }
 }
 
